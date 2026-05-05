@@ -349,6 +349,12 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		return fmt.Errorf("failed to fix seed member peer urls: %w", err)
 	}
 
+	return o.postRestoreSnapshotDataMutation(ctx, vConfig, etcdClient, requestBytes, skipKeysBytes)
+}
+
+func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vConfig *config.VirtualClusterConfig, etcdClient *clientv3.Client, requestBytes []byte, skipKeysBytes []byte) error {
+	log := klog.FromContext(ctx)
+
 	if len(skipKeysBytes) > 0 {
 		skipKeys := make(map[string]struct{})
 		if err := json.Unmarshal(skipKeysBytes, &skipKeys); err != nil {
@@ -409,7 +415,7 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		}
 
 		for podsErr := range podsErrCh {
-			return fmt.Errorf("Failed to sync pods: %v", podsErr)
+			return fmt.Errorf("failed to sync pods: %v", podsErr)
 		}
 	}
 
@@ -417,13 +423,9 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		// create restore request
 		if vConfig.ControlPlane.Standalone.Enabled {
 			// setting etcd client in standalone mode, as it is used to store the snapshot request
-			o.etcdClient, err = etcd.New(ctx, etcdCertificates, etcdEndpoint)
-			if err != nil {
-				return fmt.Errorf("failed to create etcd client: %w", err)
-			}
+			o.etcdClient = etcd.NewFromClient(etcdClient)
 		}
-		err = o.createRestoreRequest(ctx, vConfig, requestBytes, encoder)
-		if err != nil {
+		if err := o.createRestoreRequest(ctx, vConfig, requestBytes, encoder); err != nil {
 			return fmt.Errorf("failed to create restore request: %w", err)
 		}
 
@@ -471,7 +473,7 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		}
 
 		for pvsErr := range pvsErrCh {
-			return fmt.Errorf("Failed to sync pods: %v", pvsErr)
+			return fmt.Errorf("failed to sync pvs: %v", pvsErr)
 		}
 	}
 
