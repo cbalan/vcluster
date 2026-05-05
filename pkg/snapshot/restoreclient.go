@@ -455,6 +455,24 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		for pvcsErr := range pvcsErrCh {
 			return fmt.Errorf("Failed to sync pods: %v", pvcsErr)
 		}
+
+		// prepare PVs
+		pvsCh, pvsErrCh := mirror.NewSyncer(etcdClient, pvPrefix, 0).SyncBase(ctx)
+		for resp := range pvsCh {
+			for _, kv := range resp.Kvs {
+				if o.skipKey(string(kv.Key), vConfig) {
+					log.Info("Skipping key", "key", string(kv.Key))
+
+					if _, err := etcdClient.Delete(ctx, string(kv.Key)); err != nil {
+						return fmt.Errorf("failed to delete key %s: %w", string(kv.Key), err)
+					}
+				}
+			}
+		}
+
+		for pvsErr := range pvsErrCh {
+			return fmt.Errorf("Failed to sync pods: %v", pvsErr)
+		}
 	}
 
 	return nil
