@@ -1067,6 +1067,7 @@ go.etcd.io/etcd/client/v3/credentials
 go.etcd.io/etcd/client/v3/internal/endpoint
 go.etcd.io/etcd/client/v3/internal/resolver
 go.etcd.io/etcd/client/v3/kubernetes
+go.etcd.io/etcd/client/v3/mirror
 go.etcd.io/etcd/client/v3/snapshot
 # go.etcd.io/etcd/etcdutl/v3 v3.6.8
 ## explicit; go 1.24.0
