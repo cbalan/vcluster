@@ -222,9 +222,9 @@ func (o *RestoreClient) Run(ctx context.Context, vConfig *config.VirtualClusterC
 //  3. start the embedded etcd
 //  4. mutate etcd data:
 //     - reset the cluster membership
-//     - reset pods nodeName and status
 //     - remove skipped keys
-//  5. create volumes restore request, if requested
+//     - reset pods nodeName and status
+//     - reset PVC volumeName
 func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.VirtualClusterConfig, snapshotPath string) (retErr error) {
 	log := klog.FromContext(ctx)
 
@@ -402,7 +402,8 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		}
 	}
 
-	if o.RestoreVolumes && len(requestBytes) > 0 {
+	// restore volumes
+	if o.RestoreVolumes {
 		if vConfig.ControlPlane.Standalone.Enabled {
 			// setting etcd client in standalone mode, as it is used to store the snapshot request
 			o.etcdClient, err = etcd.New(ctx, etcdCertificates, etcdEndpoint)
@@ -413,6 +414,36 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		err = o.createRestoreRequest(ctx, vConfig, requestBytes, encoder)
 		if err != nil {
 			return fmt.Errorf("failed to create restore request: %w", err)
+		}
+
+		if !vConfig.PrivateNodes.Enabled {
+			pvcsCh, pvcsErrCh := mirror.NewSyncer(etcdClient, pvcPrefix, 0).SyncBase(ctx)
+			for resp := range pvcsCh {
+				for _, kv := range resp.Kvs {
+					if o.isPVCThatShouldBeRestoredInHost(string(kv.Key), vConfig) {
+						log.Info("Resetting PVC volumeName", "pvc", strings.TrimPrefix(string(kv.Key), pvcPrefix))
+						value, err := unsetVolumeName(kv.Value, decoder, encoder)
+						if err != nil {
+							return fmt.Errorf("failed to unset volume name: %w", err)
+						}
+						if _, err := etcdClient.Put(ctx, string(kv.Key), string(value)); err != nil {
+							return fmt.Errorf("failed to put pvc %s: %w", string(kv.Key), err)
+						}
+					}
+
+					if o.skipKey(string(kv.Key), vConfig) {
+						log.Info("Skipping key", "key", string(kv.Key))
+
+						if _, err := etcdClient.Delete(ctx, string(kv.Key)); err != nil {
+							return fmt.Errorf("failed to delete key %s: %w", string(kv.Key), err)
+						}
+					}
+				}
+			}
+
+			for pvcsErr := range pvcsErrCh {
+				return fmt.Errorf("Failed to sync pods: %v", pvcsErr)
+			}
 		}
 	}
 
