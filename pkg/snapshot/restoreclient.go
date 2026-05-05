@@ -383,7 +383,7 @@ func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vCo
 			}
 		}
 		for cmsErr := range cmsErrCh {
-			return fmt.Errorf("Failed to sync config maps: %v", cmsErr)
+			return fmt.Errorf("failed to sync config maps: %w", cmsErr)
 		}
 
 		log.Info("Deleting old vcluster mappings")
@@ -415,7 +415,7 @@ func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vCo
 		}
 
 		for podsErr := range podsErrCh {
-			return fmt.Errorf("failed to sync pods: %v", podsErr)
+			return fmt.Errorf("failed to sync pods: %w", podsErr)
 		}
 	}
 
@@ -455,7 +455,7 @@ func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vCo
 		}
 
 		for pvcsErr := range pvcsErrCh {
-			return fmt.Errorf("Failed to sync pods: %v", pvcsErr)
+			return fmt.Errorf("failed to sync pvcs: %w", pvcsErr)
 		}
 
 		// prepare PVs
@@ -473,7 +473,7 @@ func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vCo
 		}
 
 		for pvsErr := range pvsErrCh {
-			return fmt.Errorf("failed to sync pvs: %v", pvsErr)
+			return fmt.Errorf("failed to sync pvs: %w", pvsErr)
 		}
 	}
 
