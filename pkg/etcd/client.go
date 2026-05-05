@@ -107,10 +107,6 @@ func New(ctx context.Context, certificates *Certificates, endpoints ...string) (
 	}, nil
 }
 
-func NewFromClient(etcdClient *clientv3.Client) Client {
-	return &client{c: etcdClient}
-}
-
 type ValueOrError struct {
 	Value Value
 	Error error

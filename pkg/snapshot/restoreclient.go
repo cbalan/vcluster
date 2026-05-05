@@ -224,18 +224,16 @@ func (o *RestoreClient) Run(ctx context.Context, vConfig *config.VirtualClusterC
 //     - reset the cluster membership
 //     - remove skipped keys
 //     - reset pods nodeName and status
-//     - reset PVC volumeName
 func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.VirtualClusterConfig, snapshotPath string) (retErr error) {
 	log := klog.FromContext(ctx)
 
-	// dbPath, requestBytes and skipKeysBytes are snapshot data components to be extracted from the snapshot archive
+	// dbPath and skipKeysBytes are snapshot data components to be extracted from the snapshot archive
 	var dbPath string
 	defer func() {
 		if dbPath != "" {
 			_ = os.Remove(dbPath)
 		}
 	}()
-	var requestBytes []byte
 	var skipKeysBytes []byte
 
 	log.Info("Reading snapshot archive", "snapshotPath", snapshotPath)
@@ -259,7 +257,6 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 			if errors.Is(err, io.EOF) {
 				break
 			}
-
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 
@@ -268,18 +265,6 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 			if err != nil {
 				return fmt.Errorf("failed to write snapshot to temp file: %w", err)
 			}
-
-			continue
-		}
-
-		if strings.HasPrefix(header.Name, RequestStoreKey) {
-			if o.RestoreVolumes {
-				requestBytes, err = io.ReadAll(tarReader)
-				if err != nil {
-					return fmt.Errorf("failed to read snapshot request: %w", err)
-				}
-			}
-
 			continue
 		}
 
@@ -288,7 +273,6 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 			if err != nil {
 				return fmt.Errorf("failed to read skipKeys from tar archive: %w", err)
 			}
-
 			continue
 		}
 	}
@@ -349,10 +333,10 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		return fmt.Errorf("failed to fix seed member peer urls: %w", err)
 	}
 
-	return o.postRestoreSnapshotDataMutation(ctx, vConfig, etcdClient, requestBytes, skipKeysBytes)
+	return o.postRestoreSnapshotDataMutation(ctx, vConfig, etcdClient, skipKeysBytes)
 }
 
-func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vConfig *config.VirtualClusterConfig, etcdClient *clientv3.Client, requestBytes []byte, skipKeysBytes []byte) error {
+func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vConfig *config.VirtualClusterConfig, etcdClient *clientv3.Client, skipKeysBytes []byte) error {
 	log := klog.FromContext(ctx)
 
 	if len(skipKeysBytes) > 0 {
@@ -395,9 +379,6 @@ func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vCo
 	decoder := serializer.NewCodecFactory(scheme.Scheme).UniversalDeserializer()
 	encoder := protobuf.NewSerializer(scheme.Scheme, scheme.Scheme)
 
-	// set global vCluster name
-	translate.VClusterName = vConfig.Name
-
 	// transform pods to make sure they are not deleted on start
 	if !vConfig.PrivateNodes.Enabled {
 		podsCh, podsErrCh := mirror.NewSyncer(etcdClient, "/registry/pods/", 0).SyncBase(ctx)
@@ -416,64 +397,6 @@ func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vCo
 
 		for podsErr := range podsErrCh {
 			return fmt.Errorf("failed to sync pods: %w", podsErr)
-		}
-	}
-
-	if o.RestoreVolumes {
-		// create restore request
-		if vConfig.ControlPlane.Standalone.Enabled {
-			// setting etcd client in standalone mode, as it is used to store the snapshot request
-			o.etcdClient = etcd.NewFromClient(etcdClient)
-		}
-		if err := o.createRestoreRequest(ctx, vConfig, requestBytes, encoder); err != nil {
-			return fmt.Errorf("failed to create restore request: %w", err)
-		}
-
-		// prepare PVCs
-		pvcsCh, pvcsErrCh := mirror.NewSyncer(etcdClient, pvcPrefix, 0).SyncBase(ctx)
-		for resp := range pvcsCh {
-			for _, kv := range resp.Kvs {
-				if o.isPVCThatShouldBeRestoredInHost(string(kv.Key), vConfig) {
-					log.Info("Resetting PVC volumeName", "pvc", strings.TrimPrefix(string(kv.Key), pvcPrefix))
-					value, err := unsetVolumeName(kv.Value, decoder, encoder)
-					if err != nil {
-						return fmt.Errorf("failed to unset volume name: %w", err)
-					}
-					if _, err := etcdClient.Put(ctx, string(kv.Key), string(value)); err != nil {
-						return fmt.Errorf("failed to put pvc %s: %w", string(kv.Key), err)
-					}
-				}
-
-				if o.skipKey(string(kv.Key), vConfig) {
-					log.Info("Skipping key", "key", string(kv.Key))
-
-					if _, err := etcdClient.Delete(ctx, string(kv.Key)); err != nil {
-						return fmt.Errorf("failed to delete key %s: %w", string(kv.Key), err)
-					}
-				}
-			}
-		}
-
-		for pvcsErr := range pvcsErrCh {
-			return fmt.Errorf("failed to sync pvcs: %w", pvcsErr)
-		}
-
-		// prepare PVs
-		pvsCh, pvsErrCh := mirror.NewSyncer(etcdClient, pvPrefix, 0).SyncBase(ctx)
-		for resp := range pvsCh {
-			for _, kv := range resp.Kvs {
-				if o.skipKey(string(kv.Key), vConfig) {
-					log.Info("Skipping key", "key", string(kv.Key))
-
-					if _, err := etcdClient.Delete(ctx, string(kv.Key)); err != nil {
-						return fmt.Errorf("failed to delete key %s: %w", string(kv.Key), err)
-					}
-				}
-			}
-		}
-
-		for pvsErr := range pvsErrCh {
-			return fmt.Errorf("failed to sync pvs: %w", pvsErr)
 		}
 	}
 
