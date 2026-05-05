@@ -365,8 +365,19 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 
 	if o.NewVCluster {
 		log.Info("Deleting old kube-root-ca.crt")
-		if _, err := etcdClient.Delete(ctx, "/registry/configmaps/default/kube-root-ca.crt"); ignoreKeyNotFound(err) != nil {
-			return fmt.Errorf("failed to delete kube-root-ca.crt: %w", err)
+		cmsCh, cmsErrCh := mirror.NewSyncer(etcdClient, "/registry/configmaps/", 0).SyncBase(ctx)
+		for resp := range cmsCh {
+			for _, kv := range resp.Kvs {
+				if strings.HasSuffix(string(kv.Key), "/kube-root-ca.crt") {
+					log.Info("Deleting old kube-root-ca.crt", "key", string(kv.Key))
+					if _, err := etcdClient.Delete(ctx, string(kv.Key)); err != nil {
+						return fmt.Errorf("failed to delete kube-root-ca.crt %s: %w", string(kv.Key), err)
+					}
+				}
+			}
+		}
+		for cmsErr := range cmsErrCh {
+			return fmt.Errorf("Failed to sync config maps: %v", cmsErr)
 		}
 
 		log.Info("Deleting old vcluster mappings")
