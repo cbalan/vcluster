@@ -28,6 +28,7 @@ import (
 	"github.com/loft-sh/vcluster/pkg/snapshot/volumes"
 	"github.com/loft-sh/vcluster/pkg/util/translate"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/mirror"
 	"go.etcd.io/etcd/etcdutl/v3/snapshot"
 	etcdservererrors "go.etcd.io/etcd/server/v3/etcdserver/errors"
 	"go.etcd.io/etcd/server/v3/storage/backend"
@@ -215,8 +216,27 @@ func (o *RestoreClient) Run(ctx context.Context, vConfig *config.VirtualClusterC
 	return nil
 }
 
+// restoreSnapshot restores the vCluster embedded etcd backing store as follows:
+//  1. read snapshot data from the snapshot archive at snapshotPath
+//  2. restore the etcd snapshot via etcdutl snapshot package
+//  3. start the embedded etcd
+//  4. mutate etcd data:
+//     - reset the cluster membership
+//     - reset pods nodeName and status
+//     - remove skipped keys
+//  5. create volumes restore request, if requested
 func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.VirtualClusterConfig, snapshotPath string) (retErr error) {
 	log := klog.FromContext(ctx)
+
+	// dbPath, requestBytes and skipKeysBytes are snapshot data components to be extracted from the snapshot archive
+	var dbPath string
+	defer func() {
+		if dbPath != "" {
+			_ = os.Remove(dbPath)
+		}
+	}()
+	var requestBytes []byte
+	var skipKeysBytes []byte
 
 	log.Info("Reading snapshot archive", "snapshotPath", snapshotPath)
 	reader, err := os.Open(snapshotPath)
@@ -232,17 +252,6 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 	defer gzipReader.Close()
 
 	tarReader := tar.NewReader(gzipReader)
-
-	dbPath := ""
-	defer func() {
-		if dbPath != "" {
-			_ = os.Remove(dbPath)
-		}
-	}()
-
-	encoder := protobuf.NewSerializer(scheme.Scheme, scheme.Scheme)
-
-	var skipKeys map[string]struct{}
 
 	for {
 		header, err := tarReader.Next()
@@ -265,15 +274,9 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 
 		if strings.HasPrefix(header.Name, RequestStoreKey) {
 			if o.RestoreVolumes {
-				buf := &bytes.Buffer{}
-				_, err = io.Copy(buf, tarReader)
+				requestBytes, err = io.ReadAll(tarReader)
 				if err != nil {
 					return fmt.Errorf("failed to read snapshot request: %w", err)
-				}
-
-				err = o.createRestoreRequest(ctx, vConfig, buf.Bytes(), encoder)
-				if err != nil {
-					return fmt.Errorf("failed to create restore request: %w", err)
 				}
 			}
 
@@ -281,13 +284,9 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		}
 
 		if header.Name == SkipKeysStoreKey {
-			skipKeysBytes, err := io.ReadAll(tarReader)
+			skipKeysBytes, err = io.ReadAll(tarReader)
 			if err != nil {
 				return fmt.Errorf("failed to read skipKeys from tar archive: %w", err)
-			}
-			err = json.Unmarshal(skipKeysBytes, &skipKeys)
-			if err != nil {
-				return fmt.Errorf("failed to unmarshal skipKeys: %w", err)
 			}
 
 			continue
@@ -350,9 +349,14 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		return fmt.Errorf("failed to fix seed member peer urls: %w", err)
 	}
 
-	if len(skipKeys) > 0 {
-		log.Info("Deleting skip keys")
+	if len(skipKeysBytes) > 0 {
+		skipKeys := make(map[string]struct{})
+		if err := json.Unmarshal(skipKeysBytes, &skipKeys); err != nil {
+			return fmt.Errorf("failed to unmarshal skipKeys: %w", err)
+		}
+
 		for key := range skipKeys {
+			log.Info("Deleting skipped key", "key", key)
 			if _, err := etcdClient.Delete(ctx, key); ignoreKeyNotFound(err) != nil {
 				return fmt.Errorf("failed to delete key %s: %w", key, err)
 			}
@@ -368,6 +372,47 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		log.Info("Deleting old vcluster mappings")
 		if _, err := etcdClient.Delete(ctx, store.MappingsPrefix, clientv3.WithPrefix(), clientv3.WithRev(int64(0))); ignoreKeyNotFound(err) != nil {
 			return fmt.Errorf("failed to delete mappings prefix: %w", err)
+		}
+	}
+
+	decoder := serializer.NewCodecFactory(scheme.Scheme).UniversalDeserializer()
+	encoder := protobuf.NewSerializer(scheme.Scheme, scheme.Scheme)
+
+	// set global vCluster name
+	translate.VClusterName = vConfig.Name
+
+	// transform pods to make sure they are not deleted on start
+	if !vConfig.PrivateNodes.Enabled {
+		podsCh, podsErrCh := mirror.NewSyncer(etcdClient, "/registry/pods/", 0).SyncBase(ctx)
+		for resp := range podsCh {
+			log.Info("Resetting pods nodeName and status", "count", len(resp.Kvs))
+			for _, kv := range resp.Kvs {
+				value, err := transformPod(kv.Value, decoder, encoder)
+				if err != nil {
+					return fmt.Errorf("failed to transform pod: %w", err)
+				}
+				if _, err := etcdClient.Put(ctx, string(kv.Key), string(value)); err != nil {
+					return fmt.Errorf("failed to put pod %s: %w", string(kv.Key), err)
+				}
+			}
+		}
+
+		for podsErr := range podsErrCh {
+			return fmt.Errorf("Failed to sync pods: %v", podsErr)
+		}
+	}
+
+	if o.RestoreVolumes && len(requestBytes) > 0 {
+		if vConfig.ControlPlane.Standalone.Enabled {
+			// setting etcd client in standalone mode, as it is used to store the snapshot request
+			o.etcdClient, err = etcd.New(ctx, etcdCertificates, etcdEndpoint)
+			if err != nil {
+				return fmt.Errorf("failed to create etcd client: %w", err)
+			}
+		}
+		err = o.createRestoreRequest(ctx, vConfig, requestBytes, encoder)
+		if err != nil {
+			return fmt.Errorf("failed to create restore request: %w", err)
 		}
 	}
 
