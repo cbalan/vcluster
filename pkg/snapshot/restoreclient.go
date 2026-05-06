@@ -199,6 +199,9 @@ func (o *RestoreClient) Run(ctx context.Context, vConfig *config.VirtualClusterC
 	}
 
 	if typeMetaStamp == EtcdSnapshotTypeMetaStamp {
+		if o.RestoreVolumes {
+			return fmt.Errorf("restore volumes is not supported for etcd snapshots")
+		}
 		if vConfig.BackingStoreType() == vclusterconfig.StoreTypeEmbeddedEtcd {
 			if err := o.restoreSnapshot(ctx, vConfig, snapshotPath); err != nil {
 				return fmt.Errorf("failed to restore etcd snapshot: %w", err)
