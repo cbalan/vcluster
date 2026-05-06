@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -224,7 +223,6 @@ func (o *RestoreClient) Run(ctx context.Context, vConfig *config.VirtualClusterC
 //  2. restore the etcd snapshot via etcdutl snapshot package
 //  3. start the embedded etcd
 //  4. mutate etcd data:
-//     - reset the cluster membership
 //     - remove skipped keys
 //     - reset pods nodeName and status
 func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.VirtualClusterConfig, snapshotPath string) (retErr error) {
@@ -301,8 +299,8 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		Name:                "default",
 		OutputDataDir:       constants.EmbeddedEtcdData,
 		OutputWALDir:        datadir.ToWALDir(constants.EmbeddedEtcdData),
-		PeerURLs:            []string{"http://127.0.0.1:2380"},
-		InitialCluster:      "default=http://127.0.0.1:2380",
+		PeerURLs:            []string{"http://127.0.0.1:102380"},
+		InitialCluster:      "default=http://127.0.0.1:102380",
 		InitialClusterToken: "etcd-cluster",
 		SkipHashCheck:       false,
 		InitialMmapSize:     backend.InitialMmapSize,
@@ -331,10 +329,6 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		return fmt.Errorf("failed to get etcd client: %w", err)
 	}
 	defer etcdClient.Close()
-
-	if err := fixSeedMemberPeerUrls(ctx, etcdClient); err != nil {
-		return fmt.Errorf("failed to fix seed member peer urls: %w", err)
-	}
 
 	return o.postRestoreSnapshotDataMutation(ctx, vConfig, etcdClient, skipKeysBytes)
 }
@@ -1145,50 +1139,4 @@ func ignoreKeyNotFound(err error) error {
 	}
 
 	return err
-}
-
-// fixSeedMemberPeerUrls fixes the peer urls of the seed member to match the expected value.
-// The required value is not available at the time of the WAL restore.
-func fixSeedMemberPeerUrls(ctx context.Context, etcdClient *clientv3.Client) error {
-	log := klog.FromContext(ctx)
-
-	memberList, err := etcdClient.MemberList(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get member list: %w", err)
-	}
-
-	if len(memberList.Members) != 1 {
-		log.Info("Not a single member cluster, skipping fixing seed member peer urls")
-		return nil
-	}
-
-	member := memberList.Members[0]
-
-	if len(member.PeerURLs) != 1 {
-		log.Info("Unexpected number of peer urls, skipping fixing seed member peer urls", "peerUrls", member.PeerURLs)
-		return nil
-	}
-
-	if member.PeerURLs[0] != "http://127.0.0.1:2380" {
-		log.Info("Unexpected peer url, skipping fixing seed member peer urls", "peerUrl", member.PeerURLs[0])
-		return nil
-	}
-
-	if len(member.ClientURLs) == 0 {
-		log.Info("No client urls, skipping fixing seed member peer urls")
-		return nil
-	}
-
-	clientURL, err := url.Parse(member.ClientURLs[0])
-	if err != nil {
-		return fmt.Errorf("failed to parse client url: %w", err)
-	}
-
-	peerURL := fmt.Sprintf("https://%s:2380", clientURL.Hostname())
-	log.Info("Updating seed member peer url", "peerUrl", peerURL)
-	if _, err := etcdClient.MemberUpdate(ctx, member.ID, []string{peerURL}); err != nil {
-		return fmt.Errorf("failed to update peer url: %w", err)
-	}
-
-	return nil
 }
