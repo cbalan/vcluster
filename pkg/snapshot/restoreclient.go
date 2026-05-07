@@ -24,6 +24,7 @@ import (
 	"github.com/loft-sh/vcluster/pkg/pro"
 	"github.com/loft-sh/vcluster/pkg/scheme"
 	setupconfig "github.com/loft-sh/vcluster/pkg/setup/config"
+	"github.com/loft-sh/vcluster/pkg/snapshot/etcdlocal"
 	"github.com/loft-sh/vcluster/pkg/snapshot/volumes"
 	"github.com/loft-sh/vcluster/pkg/util/translate"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -219,13 +220,13 @@ func (o *RestoreClient) Run(ctx context.Context, vConfig *config.VirtualClusterC
 }
 
 // restoreSnapshot restores the vCluster embedded etcd backing store as follows:
-//  1. read snapshot data from the snapshot archive at snapshotPath
-//  2. restore the etcd snapshot via etcdutl snapshot package
-//  3. start the embedded etcd
-//  4. mutate etcd data:
+//  1. read snapshot data from the snapshot archive
+//  2. restore the etcd snapshot via etcdutl snapshot package into a temp directory
+//  3. mutate etcd data via etcdlocal instance:
 //     - remove skipped keys
 //     - reset pods nodeName and status
-func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.VirtualClusterConfig, snapshotPath string) (retErr error) {
+//  4. replace the etcd data directory with the restored data
+func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.VirtualClusterConfig, snapshotPath string) error {
 	log := klog.FromContext(ctx)
 
 	// dbPath and skipKeysBytes are snapshot data components to be extracted from the snapshot archive
@@ -282,25 +283,21 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		return fmt.Errorf("failed to find etcd snapshot in tar archive")
 	}
 
-	if err := backupFolder(ctx, constants.EmbeddedEtcdData); err != nil {
-		return fmt.Errorf("failed to backup etcd dataDir: %w", err)
+	// create restore temp dir
+	restoreDataDir, err := os.MkdirTemp(filepath.Dir(constants.EmbeddedEtcdData), "etcd-restore-")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
 	}
-	defer func() {
-		if retErr != nil {
-			if err := restoreBackupFolder(ctx, constants.EmbeddedEtcdData); err != nil {
-				klog.Errorf("Failed to revert etcd dataDir: %v", err)
-			}
-		}
-	}()
+	defer os.RemoveAll(restoreDataDir)
 
 	log.Info("Restoring etcd snapshot", "dbPath", dbPath)
 	if err := snapshot.NewV3(zap.L().Named("restore-etcd")).Restore(snapshot.RestoreConfig{
 		SnapshotPath:        dbPath,
 		Name:                "default",
-		OutputDataDir:       constants.EmbeddedEtcdData,
-		OutputWALDir:        datadir.ToWALDir(constants.EmbeddedEtcdData),
-		PeerURLs:            []string{"http://127.0.0.1:2380"},
-		InitialCluster:      "default=http://127.0.0.1:2380",
+		OutputDataDir:       restoreDataDir,
+		OutputWALDir:        datadir.ToWALDir(restoreDataDir),
+		PeerURLs:            []string{embed.DefaultListenPeerURLs},
+		InitialCluster:      "default=" + embed.DefaultListenPeerURLs,
 		InitialClusterToken: "etcd-cluster",
 		SkipHashCheck:       false,
 		InitialMmapSize:     backend.InitialMmapSize,
@@ -310,31 +307,29 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		return fmt.Errorf("restore etcd: %w", err)
 	}
 
-	log.Info("Starting embedded etcd to reset cluster membership")
-	stop, err := startEmbeddedEtcd(ctx, vConfig)
-	if err != nil {
-		return fmt.Errorf("failed to start embedded etcd: %w", err)
-	}
-	defer stop()
-
-	log.Info("Waiting for embedded etcd to be ready")
-	etcdEndpoint, etcdCertificates := etcd.GetEtcdEndpoint(vConfig)
-
-	if err := etcd.WaitForEtcd(ctx, etcdCertificates, etcdEndpoint); err != nil {
-		return fmt.Errorf("failed to wait for embedded etcd: %w", err)
+	if err := o.postRestoreSnapshotDataMutation(ctx, vConfig, restoreDataDir, skipKeysBytes); err != nil {
+		return fmt.Errorf("failed to mutate data: %w", err)
 	}
 
-	etcdClient, err := etcd.GetEtcdClient(ctx, zap.L().Named("etcd-client"), etcdCertificates, etcdEndpoint)
-	if err != nil {
-		return fmt.Errorf("failed to get etcd client: %w", err)
+	log.Info("Replacing etcd data directory with the restored data")
+	if err := replaceEtcdDataDir(ctx, constants.EmbeddedEtcdData, restoreDataDir); err != nil {
+		return fmt.Errorf("failed to replace etcd data directory: %w", err)
 	}
-	defer etcdClient.Close()
 
-	return o.postRestoreSnapshotDataMutation(ctx, vConfig, etcdClient, skipKeysBytes)
+	return nil
 }
 
-func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vConfig *config.VirtualClusterConfig, etcdClient *clientv3.Client, skipKeysBytes []byte) error {
+func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vConfig *config.VirtualClusterConfig, dataDir string, skipKeysBytes []byte) error {
 	log := klog.FromContext(ctx)
+
+	log.Info("Starting local etcd to mutate data")
+	etcdLocal, err := etcdlocal.StartEtcd(ctx, zap.L(), dataDir)
+	if err != nil {
+		return fmt.Errorf("failed to start embed etcd: %w", err)
+	}
+	defer etcdLocal.Close()
+
+	etcdClient := etcdLocal.Client
 
 	if len(skipKeysBytes) > 0 {
 		skipKeys := make(map[string]struct{})
@@ -856,10 +851,7 @@ func setLatestRevisionSQLite(ctx context.Context, file string, revision int64) e
 	defer cancel()
 
 	// start & stop kine to create the database
-	doneChan := k8s.StartKineWithDone(kineCtx, fmt.Sprintf("sqlite://%s%s", file, k8s.SQLiteParams), constants.K8sKineEndpoint, nil,
-		// disable the kine metrics listener, not required for snapshots and would conflict on port
-		[]string{"--metrics-bind-address=0"},
-	)
+	doneChan := k8s.StartKineWithDone(kineCtx, fmt.Sprintf("sqlite://%s%s", file, k8s.SQLiteParams), constants.K8sKineEndpoint, nil, nil)
 
 	// wait until file is created or kine fails or timeout
 	kineStartTimeout := 30 * time.Second
@@ -1059,24 +1051,6 @@ func backupFolder(ctx context.Context, dir string) error {
 	return os.MkdirAll(dir, 0777)
 }
 
-func restoreBackupFolder(ctx context.Context, dir string) error {
-	backupName := dir + ".backup"
-	if _, err := os.Stat(backupName); os.IsNotExist(err) {
-		return nil
-	}
-
-	klog.FromContext(ctx).Info(fmt.Sprintf("Restoring etcd dataDir %s from backup...", constants.EmbeddedEtcdData))
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("restoreBackupFolder: failed to remove %s: %w", dir, err)
-	}
-
-	if err := os.Rename(backupName, dir); err != nil {
-		return fmt.Errorf("restoreBackupFolder: failed to rename %s: %w", dir, err)
-	}
-
-	return nil
-}
-
 func readKeyValue(tarReader *tar.Reader) ([]byte, []byte, error) {
 	header, err := tarReader.Next()
 	if err != nil {
@@ -1139,4 +1113,20 @@ func ignoreKeyNotFound(err error) error {
 	}
 
 	return err
+}
+
+func replaceEtcdDataDir(ctx context.Context, dataDir string, newDir string) error {
+	log := klog.FromContext(ctx)
+
+	log.Info("Removing etcd dataDir", "dataDir", dataDir)
+	if err := os.RemoveAll(dataDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove %s: %w", dataDir, err)
+	}
+
+	log.Info("Renaming etcd newDir to dataDir", "newDir", newDir, "dataDir", dataDir)
+	if err := os.Rename(newDir, dataDir); err != nil {
+		return fmt.Errorf("failed to rename %s to %s: %w", newDir, dataDir, err)
+	}
+
+	return nil
 }
