@@ -83,7 +83,7 @@ func StartEtcd(ctx context.Context, log *zap.Logger, dataDir string) (*Etcd, err
 		log.Info("Server is ready for updates")
 	case <-time.After(10 * time.Second):
 		s.Stop()
-		return nil, fmt.Errorf("Server timed out during startup")
+		return nil, fmt.Errorf("server timed out during startup")
 	}
 
 	c := clientv3.NewCtxClient(ctx, clientv3.WithZapLogger(log.Named("local-etcd-client")))
