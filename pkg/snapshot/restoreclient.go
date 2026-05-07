@@ -1162,13 +1162,11 @@ func nameAndPeerURLForConfig(vConfig *config.VirtualClusterConfig) (string, stri
 			}
 			peerURL := fmt.Sprintf("https://%s:2380", name)
 			return name, peerURL, nil
-
 		} else {
 			name := fmt.Sprintf("%s-0", vConfig.Name)
 			peerURL := fmt.Sprintf("https://%s.%s-headless.%s:2380", name, vConfig.Name, namespace)
 			return name, peerURL, nil
 		}
-
 	case vclusterconfig.StoreTypeDeployedEtcd:
 		name := fmt.Sprintf("%s-etcd-0", vConfig.Name)
 		peerURL := fmt.Sprintf("https://%s.%s-etcd-headless.%s:2380", name, vConfig.Name, namespace)
