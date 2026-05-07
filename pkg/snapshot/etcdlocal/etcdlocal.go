@@ -16,11 +16,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	DefaultName          = "default"
-	DefaultListenPeerURL = "http://localhost:2380"
-)
-
 type Etcd struct {
 	Server *etcdserver.EtcdServer
 	Client *clientv3.Client
@@ -64,7 +59,7 @@ func StartEtcd(ctx context.Context, log *zap.Logger, restoreConfig snapshot.Rest
 		WarningUnaryRequestDuration: 300 * time.Millisecond,
 
 		MaxLearners:       1,
-		ServerFeatureGate: features.NewDefaultServerFeatureGate(DefaultName, log),
+		ServerFeatureGate: features.NewDefaultServerFeatureGate(restoreConfig.Name, log),
 		Metrics:           "basic",
 	}
 

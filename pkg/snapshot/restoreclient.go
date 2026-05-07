@@ -26,6 +26,7 @@ import (
 	setupconfig "github.com/loft-sh/vcluster/pkg/setup/config"
 	"github.com/loft-sh/vcluster/pkg/snapshot/etcdlocal"
 	"github.com/loft-sh/vcluster/pkg/snapshot/volumes"
+	"github.com/loft-sh/vcluster/pkg/util/clienthelper"
 	"github.com/loft-sh/vcluster/pkg/util/translate"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/mirror"
@@ -1143,6 +1144,15 @@ func replaceEtcdDataDir(ctx context.Context, dataDir string, newDir string) erro
 }
 
 func nameAndPeerURLForConfig(vConfig *config.VirtualClusterConfig) (string, string, error) {
+	namespace := vConfig.HostNamespace
+	if namespace == "" {
+		var err error
+		namespace, err = clienthelper.CurrentNamespace()
+		if err != nil {
+			return "", "", err
+		}
+	}
+
 	switch vConfig.BackingStoreType() {
 	case vclusterconfig.StoreTypeEmbeddedEtcd:
 		if vConfig.ControlPlane.Standalone.Enabled {
@@ -1155,13 +1165,13 @@ func nameAndPeerURLForConfig(vConfig *config.VirtualClusterConfig) (string, stri
 
 		} else {
 			name := fmt.Sprintf("%s-0", vConfig.Name)
-			peerURL := fmt.Sprintf("https://%s.%s-headless.%s:2380", name, vConfig.Name, vConfig.HostNamespace)
+			peerURL := fmt.Sprintf("https://%s.%s-headless.%s:2380", name, vConfig.Name, namespace)
 			return name, peerURL, nil
 		}
 
 	case vclusterconfig.StoreTypeDeployedEtcd:
 		name := fmt.Sprintf("%s-etcd-0", vConfig.Name)
-		peerURL := fmt.Sprintf("https://%s.%s-etcd-headless.%s:2380", name, vConfig.Name, vConfig.HostNamespace)
+		peerURL := fmt.Sprintf("https://%s.%s-etcd-headless.%s:2380", name, vConfig.Name, namespace)
 		return name, peerURL, nil
 	default:
 		return "", "", fmt.Errorf("unknown backing store type")
