@@ -3,7 +3,6 @@ package etcdlocal
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"time"
 
 	"go.etcd.io/etcd/client/pkg/v3/types"
@@ -17,6 +16,11 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	DefaultName          = "default"
+	DefaultListenPeerURL = "http://localhost:2380"
+)
+
 type Etcd struct {
 	Server *etcdserver.EtcdServer
 	Client *clientv3.Client
@@ -25,8 +29,13 @@ type Etcd struct {
 // StartEtcd starts a local etcd server without binding to a port.
 // It is intended for post etcdutl snapshot restore operations.
 func StartEtcd(ctx context.Context, log *zap.Logger, dataDir string) (*Etcd, error) {
+	peerUrls, err := types.NewURLs([]string{DefaultListenPeerURL})
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse initial cluster: %w", err)
+	}
+
 	sc := config.ServerConfig{
-		Name:                   "default",
+		Name:                   DefaultName,
 		DataDir:                dataDir,
 		DedicatedWALDir:        datadir.ToWALDir(dataDir),
 		SnapshotCount:          etcdserver.DefaultSnapshotCount,
@@ -34,7 +43,7 @@ func StartEtcd(ctx context.Context, log *zap.Logger, dataDir string) (*Etcd, err
 		MaxWALFiles:            5,
 
 		InitialPeerURLsMap: types.URLsMap{
-			"default": []url.URL{{Scheme: "http", Host: "localhost:2380"}},
+			DefaultName: peerUrls,
 		},
 
 		TickMs:                     100,
@@ -57,7 +66,7 @@ func StartEtcd(ctx context.Context, log *zap.Logger, dataDir string) (*Etcd, err
 		WarningUnaryRequestDuration: 300 * time.Millisecond,
 
 		MaxLearners:       1,
-		ServerFeatureGate: features.NewDefaultServerFeatureGate("default", log),
+		ServerFeatureGate: features.NewDefaultServerFeatureGate(DefaultName, log),
 		Metrics:           "basic",
 	}
 

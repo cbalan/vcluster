@@ -292,17 +292,16 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 
 	log.Info("Restoring etcd snapshot", "dbPath", dbPath)
 	if err := snapshot.NewV3(zap.L().Named("restore-etcd")).Restore(snapshot.RestoreConfig{
-		SnapshotPath:        dbPath,
-		Name:                "default",
-		OutputDataDir:       restoreDataDir,
-		OutputWALDir:        datadir.ToWALDir(restoreDataDir),
-		PeerURLs:            []string{embed.DefaultListenPeerURLs},
-		InitialCluster:      "default=" + embed.DefaultListenPeerURLs,
-		InitialClusterToken: "etcd-cluster",
-		SkipHashCheck:       false,
-		InitialMmapSize:     backend.InitialMmapSize,
-		RevisionBump:        uint64(BumpRevision),
-		MarkCompacted:       true,
+		SnapshotPath:    dbPath,
+		Name:            etcdlocal.DefaultName,
+		OutputDataDir:   restoreDataDir,
+		OutputWALDir:    datadir.ToWALDir(restoreDataDir),
+		PeerURLs:        []string{etcdlocal.DefaultListenPeerURL},
+		InitialCluster:  etcdlocal.DefaultName + "=" + etcdlocal.DefaultListenPeerURL,
+		SkipHashCheck:   false,
+		InitialMmapSize: backend.InitialMmapSize,
+		RevisionBump:    uint64(BumpRevision),
+		MarkCompacted:   true,
 	}); err != nil {
 		return fmt.Errorf("restore etcd: %w", err)
 	}
