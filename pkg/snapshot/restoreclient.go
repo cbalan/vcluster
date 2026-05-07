@@ -291,22 +291,31 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 	defer os.RemoveAll(restoreDataDir)
 
 	log.Info("Restoring etcd snapshot", "dbPath", dbPath)
-	if err := snapshot.NewV3(zap.L().Named("restore-etcd")).Restore(snapshot.RestoreConfig{
-		SnapshotPath:    dbPath,
-		Name:            etcdlocal.DefaultName,
-		OutputDataDir:   restoreDataDir,
-		OutputWALDir:    datadir.ToWALDir(restoreDataDir),
-		PeerURLs:        []string{etcdlocal.DefaultListenPeerURL},
-		InitialCluster:  etcdlocal.DefaultName + "=" + etcdlocal.DefaultListenPeerURL,
-		SkipHashCheck:   false,
-		InitialMmapSize: backend.InitialMmapSize,
-		RevisionBump:    uint64(BumpRevision),
-		MarkCompacted:   true,
-	}); err != nil {
+
+	name, peerUrl, err := nameAndPeerURLForConfig(vConfig)
+	if err != nil {
+		return fmt.Errorf("failed to get name and peer URL: %w", err)
+	}
+
+	restoreConfig := snapshot.RestoreConfig{
+		SnapshotPath:        dbPath,
+		Name:                name,
+		OutputDataDir:       restoreDataDir,
+		OutputWALDir:        datadir.ToWALDir(restoreDataDir),
+		PeerURLs:            []string{peerUrl},
+		InitialCluster:      name + "=" + peerUrl,
+		InitialClusterToken: "vcluster",
+		SkipHashCheck:       false,
+		InitialMmapSize:     backend.InitialMmapSize,
+		RevisionBump:        uint64(BumpRevision),
+		MarkCompacted:       true,
+	}
+
+	if err := snapshot.NewV3(zap.L().Named("restore-etcd")).Restore(restoreConfig); err != nil {
 		return fmt.Errorf("restore etcd: %w", err)
 	}
 
-	if err := o.postRestoreSnapshotDataMutation(ctx, vConfig, restoreDataDir, skipKeysBytes); err != nil {
+	if err := o.postRestoreSnapshotDataMutation(ctx, vConfig, restoreConfig, skipKeysBytes); err != nil {
 		return fmt.Errorf("failed to mutate data: %w", err)
 	}
 
@@ -318,11 +327,11 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 	return nil
 }
 
-func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vConfig *config.VirtualClusterConfig, dataDir string, skipKeysBytes []byte) error {
+func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vConfig *config.VirtualClusterConfig, restoreConfig snapshot.RestoreConfig, skipKeysBytes []byte) error {
 	log := klog.FromContext(ctx)
 
 	log.Info("Starting local etcd to mutate data")
-	etcdLocal, err := etcdlocal.StartEtcd(ctx, zap.L(), dataDir)
+	etcdLocal, err := etcdlocal.StartEtcd(ctx, zap.L(), restoreConfig)
 	if err != nil {
 		return fmt.Errorf("failed to start embed etcd: %w", err)
 	}
@@ -1131,4 +1140,30 @@ func replaceEtcdDataDir(ctx context.Context, dataDir string, newDir string) erro
 	}
 
 	return nil
+}
+
+func nameAndPeerURLForConfig(vConfig *config.VirtualClusterConfig) (string, string, error) {
+	switch vConfig.BackingStoreType() {
+	case vclusterconfig.StoreTypeEmbeddedEtcd:
+		if vConfig.ControlPlane.Standalone.Enabled {
+			name := os.Getenv(constants.VClusterStandaloneIPAddressEnvVar)
+			if name == "" {
+				return "", "", fmt.Errorf("could not determine the IP address for the embedded etcd peer")
+			}
+			peerURL := fmt.Sprintf("https://%s:2380", name)
+			return name, peerURL, nil
+
+		} else {
+			name := fmt.Sprintf("%s-0", vConfig.Name)
+			peerURL := fmt.Sprintf("https://%s.%s-headless.%s:2380", name, vConfig.Name, vConfig.HostNamespace)
+			return name, peerURL, nil
+		}
+
+	case vclusterconfig.StoreTypeDeployedEtcd:
+		name := fmt.Sprintf("%s-etcd-0", vConfig.Name)
+		peerURL := fmt.Sprintf("https://%s.%s-etcd-headless.%s:2380", name, vConfig.Name, vConfig.HostNamespace)
+		return name, peerURL, nil
+	default:
+		return "", "", fmt.Errorf("unknown backing store type")
+	}
 }

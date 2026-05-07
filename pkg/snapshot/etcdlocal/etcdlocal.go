@@ -7,12 +7,12 @@ import (
 
 	"go.etcd.io/etcd/client/pkg/v3/types"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/etcdutl/v3/snapshot"
 	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3rpc"
 	"go.etcd.io/etcd/server/v3/features"
 	"go.etcd.io/etcd/server/v3/proxy/grpcproxy/adapter"
-	"go.etcd.io/etcd/server/v3/storage/datadir"
 	"go.uber.org/zap"
 )
 
@@ -28,23 +28,21 @@ type Etcd struct {
 
 // StartEtcd starts a local etcd server without binding to a port.
 // It is intended for post etcdutl snapshot restore operations.
-func StartEtcd(ctx context.Context, log *zap.Logger, dataDir string) (*Etcd, error) {
-	peerUrls, err := types.NewURLs([]string{DefaultListenPeerURL})
+func StartEtcd(ctx context.Context, log *zap.Logger, restoreConfig snapshot.RestoreConfig) (*Etcd, error) {
+	urlsmap, err := types.NewURLsMap(restoreConfig.InitialCluster)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse initial cluster: %w", err)
 	}
 
 	sc := config.ServerConfig{
-		Name:                   DefaultName,
-		DataDir:                dataDir,
-		DedicatedWALDir:        datadir.ToWALDir(dataDir),
+		Name:                   restoreConfig.Name,
+		DataDir:                restoreConfig.OutputDataDir,
+		DedicatedWALDir:        restoreConfig.OutputWALDir,
 		SnapshotCount:          etcdserver.DefaultSnapshotCount,
 		SnapshotCatchUpEntries: etcdserver.DefaultSnapshotCatchUpEntries,
 		MaxWALFiles:            5,
 
-		InitialPeerURLsMap: types.URLsMap{
-			DefaultName: peerUrls,
-		},
+		InitialPeerURLsMap: urlsmap,
 
 		TickMs:                     100,
 		ElectionTicks:              10,
