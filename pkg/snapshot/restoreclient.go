@@ -293,7 +293,7 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 
 	log.Info("Restoring etcd snapshot", "dbPath", dbPath)
 
-	name, peerUrl, err := nameAndPeerURLForConfig(vConfig)
+	name, peerURL, err := nameAndPeerURLForConfig(vConfig)
 	if err != nil {
 		return fmt.Errorf("failed to get name and peer URL: %w", err)
 	}
@@ -303,8 +303,8 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 		Name:                name,
 		OutputDataDir:       restoreDataDir,
 		OutputWALDir:        datadir.ToWALDir(restoreDataDir),
-		PeerURLs:            []string{peerUrl},
-		InitialCluster:      name + "=" + peerUrl,
+		PeerURLs:            []string{peerURL},
+		InitialCluster:      name + "=" + peerURL,
 		InitialClusterToken: "vcluster",
 		SkipHashCheck:       false,
 		InitialMmapSize:     backend.InitialMmapSize,
