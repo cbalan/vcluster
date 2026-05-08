@@ -50,11 +50,9 @@ func PauseVCluster(ctx context.Context, kubeClient *kubernetes.Clientset, name, 
 		}
 
 		// scale down etcd
-		if !isRestore {
-			_, err = scaleDownStatefulSet(ctx, kubeClient, "app=vcluster-etcd,release="+name, namespace, isRestore, log)
-			if err != nil {
-				return err
-			}
+		_, err = scaleDownStatefulSet(ctx, kubeClient, "app=vcluster-etcd,release="+name, namespace, isRestore, log)
+		if err != nil {
+			return err
 		}
 	}
 

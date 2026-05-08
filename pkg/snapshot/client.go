@@ -66,13 +66,13 @@ func (c *Client) Run(ctx context.Context, vConfig *config.VirtualClusterConfig) 
 
 	// write the snapshot
 	klog.Infof("Start writing etcd snapshot %s...", objectStore.Target())
-
-	if vConfig.BackingStoreType() == vclusterconfig.StoreTypeEmbeddedEtcd {
+	switch vConfig.BackingStoreType() {
+	case vclusterconfig.StoreTypeEmbeddedEtcd, vclusterconfig.StoreTypeDeployedEtcd:
 		err = c.writeSnapshot(ctx, etcdClient, objectStore)
 		if err != nil {
 			return err
 		}
-	} else {
+	default:
 		err = c.writeKeyValueSnapshot(ctx, etcdClient, objectStore)
 		if err != nil {
 			return err

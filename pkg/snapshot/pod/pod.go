@@ -367,6 +367,11 @@ func CreateSnapshotPod(
 		}
 	}
 
+	// add deployed-etcd data volume
+	if err := addDeployedEtcdDataVolumes(ctx, kubeClient, vCluster, newPod, log); err != nil {
+		return nil, fmt.Errorf("adding deployed-etcd data volume: %w", err)
+	}
+
 	// create the pod
 	log.Infof("Starting snapshot pod for vCluster %s/%s...", vCluster.Namespace, vCluster.Name)
 	newPod, err = kubeClient.CoreV1().Pods(vCluster.Namespace).Create(ctx, newPod, metav1.CreateOptions{})
@@ -606,4 +611,50 @@ func WaitForCompletedPod(ctx context.Context, kubeClient *kubernetes.Clientset, 
 	}
 
 	return exitCode, nil
+}
+
+func addDeployedEtcdDataVolumes(ctx context.Context, kubeClient kubernetes.Interface, vCluster *find.VCluster, newPod *corev1.Pod, log log.Logger) error {
+	// list deployed-etcd pvcs
+	pvcList, err := kubeClient.CoreV1().PersistentVolumeClaims(vCluster.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=vcluster-etcd,release=%s", vCluster.Name),
+	})
+	if err != nil {
+		return fmt.Errorf("list vcluster-etcd pvcs: %w", err)
+	}
+
+	// mount the deployed-etcd pvc to the snapshot container
+	var volumeMounts []corev1.VolumeMount
+	for _, pvc := range pvcList.Items {
+		mountPath := fmt.Sprintf("/data-deployed-etcd/%s", pvc.Name)
+
+		// add data volume mount
+		newPod.Spec.Volumes = append(newPod.Spec.Volumes, corev1.Volume{
+			Name: pvc.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvc.Name,
+				},
+			},
+		})
+
+		// add data volume mount
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      pvc.Name,
+			MountPath: mountPath,
+		})
+
+		log.Info("Mounted deployed-etcd pvc", "path", mountPath)
+	}
+
+	// find the snapshot container
+	i := slices.IndexFunc(newPod.Spec.Containers, func(container corev1.Container) bool {
+		return container.Name == "snapshot"
+	})
+	if i == -1 {
+		return fmt.Errorf("container snapshot not found in newPod spec")
+	}
+
+	newPod.Spec.Containers[i].VolumeMounts = append(newPod.Spec.Containers[i].VolumeMounts, volumeMounts...)
+
+	return nil
 }

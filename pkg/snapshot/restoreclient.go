@@ -203,11 +203,13 @@ func (o *RestoreClient) Run(ctx context.Context, vConfig *config.VirtualClusterC
 		if o.RestoreVolumes {
 			return fmt.Errorf("restore volumes is not supported for etcd snapshots")
 		}
-		if vConfig.BackingStoreType() == vclusterconfig.StoreTypeEmbeddedEtcd {
+
+		switch vConfig.BackingStoreType() {
+		case vclusterconfig.StoreTypeEmbeddedEtcd, vclusterconfig.StoreTypeDeployedEtcd:
 			if err := o.restoreSnapshot(ctx, vConfig, snapshotPath); err != nil {
 				return fmt.Errorf("failed to restore etcd snapshot: %w", err)
 			}
-		} else {
+		default:
 			return fmt.Errorf("restore etcd snapshot is not supported for store type %s", vConfig.BackingStoreType())
 		}
 	} else {
@@ -321,8 +323,14 @@ func (o *RestoreClient) restoreSnapshot(ctx context.Context, vConfig *config.Vir
 	}
 
 	log.Info("Replacing etcd data directory with the restored data")
-	if err := replaceEtcdDataDir(ctx, constants.EmbeddedEtcdData, restoreDataDir); err != nil {
-		return fmt.Errorf("failed to replace etcd data directory: %w", err)
+	if vConfig.BackingStoreType() == vclusterconfig.StoreTypeDeployedEtcd {
+		if err := replaceDeployedEtcdDataDir(ctx, vConfig, restoreConfig); err != nil {
+			return fmt.Errorf("failed to replace etcd data directory: %w", err)
+		}
+	} else {
+		if err := replaceEtcdDataDir(ctx, constants.EmbeddedEtcdData, restoreConfig); err != nil {
+			return fmt.Errorf("failed to replace etcd data directory: %w", err)
+		}
 	}
 
 	return nil
@@ -1126,7 +1134,7 @@ func ignoreKeyNotFound(err error) error {
 	return err
 }
 
-func replaceEtcdDataDir(ctx context.Context, dataDir string, newDir string) error {
+func replaceEtcdDataDir(ctx context.Context, dataDir string, restoreConfig snapshot.RestoreConfig) error {
 	log := klog.FromContext(ctx)
 
 	log.Info("Removing etcd dataDir", "dataDir", dataDir)
@@ -1134,9 +1142,19 @@ func replaceEtcdDataDir(ctx context.Context, dataDir string, newDir string) erro
 		return fmt.Errorf("failed to remove %s: %w", dataDir, err)
 	}
 
-	log.Info("Renaming etcd newDir to dataDir", "newDir", newDir, "dataDir", dataDir)
-	if err := os.Rename(newDir, dataDir); err != nil {
-		return fmt.Errorf("failed to rename %s to %s: %w", newDir, dataDir, err)
+	if err := snapshot.NewV3(zap.L().Named("restore-etcd")).Restore(snapshot.RestoreConfig{
+		SnapshotPath:        datadir.ToBackendFileName(restoreConfig.OutputDataDir),
+		Name:                restoreConfig.Name,
+		OutputDataDir:       dataDir,
+		OutputWALDir:        datadir.ToWALDir(dataDir),
+		PeerURLs:            restoreConfig.PeerURLs,
+		InitialCluster:      restoreConfig.InitialCluster,
+		InitialClusterToken: restoreConfig.InitialClusterToken,
+		SkipHashCheck:       true,
+		InitialMmapSize:     restoreConfig.InitialMmapSize,
+		MarkCompacted:       true,
+	}); err != nil {
+		return fmt.Errorf("restore etcd: %w", err)
 	}
 
 	return nil
@@ -1173,4 +1191,54 @@ func nameAndPeerURLForConfig(vConfig *config.VirtualClusterConfig) (string, stri
 	default:
 		return "", "", fmt.Errorf("unknown backing store type")
 	}
+}
+
+func replaceDeployedEtcdDataDir(ctx context.Context, vConfig *config.VirtualClusterConfig, restoreConfig snapshot.RestoreConfig) error {
+	namespace := vConfig.HostNamespace
+	if namespace == "" {
+		var err error
+		namespace, err = clienthelper.CurrentNamespace()
+		if err != nil {
+			return err
+		}
+	}
+
+	deployedEtcdReplicas := vConfig.ControlPlane.BackingStore.Etcd.Deploy.StatefulSet.HighAvailability.Replicas
+
+	var initialClusterParts []string
+	for i := range deployedEtcdReplicas {
+		name := fmt.Sprintf("%s-etcd-%d", vConfig.Name, i)
+		initialClusterParts = append(initialClusterParts, fmt.Sprintf("%s=https://%s.%s-etcd-headless.%s:2380", name, name, vConfig.Name, namespace))
+	}
+
+	initialCluster := strings.Join(initialClusterParts, ",")
+
+	for i := range deployedEtcdReplicas {
+		name := fmt.Sprintf("%s-etcd-%d", vConfig.Name, i)
+		peerURL := fmt.Sprintf("https://%s.%s-etcd-headless.%s:2380", name, vConfig.Name, namespace)
+		memberDataDir := fmt.Sprintf("/data-deployed-etcd/data-%s-etcd-%d", vConfig.Name, i)
+
+		// delete contents in deployed etcd memeber
+		if err := os.RemoveAll(datadir.ToMemberDir(memberDataDir)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove %s: %w", memberDataDir, err)
+		}
+
+		// restore database
+		if err := snapshot.NewV3(zap.L().Named("restore-etcd")).Restore(snapshot.RestoreConfig{
+			SnapshotPath:        datadir.ToBackendFileName(restoreConfig.OutputDataDir),
+			Name:                name,
+			OutputDataDir:       memberDataDir,
+			OutputWALDir:        datadir.ToWALDir(memberDataDir),
+			PeerURLs:            []string{peerURL},
+			InitialCluster:      initialCluster,
+			InitialClusterToken: vConfig.Name,
+			SkipHashCheck:       true,
+			InitialMmapSize:     restoreConfig.InitialMmapSize,
+			MarkCompacted:       true,
+		}); err != nil {
+			return fmt.Errorf("restore etcd: %w", err)
+		}
+	}
+
+	return nil
 }
