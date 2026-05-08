@@ -356,19 +356,18 @@ func (o *RestoreClient) postRestoreSnapshotDataMutation(ctx context.Context, vCo
 
 	if o.NewVCluster {
 		log.Info("Deleting old kube-root-ca.crt")
-		cmsCh, cmsErrCh := mirror.NewSyncer(etcdClient, "/registry/configmaps/", 0).SyncBase(ctx)
-		for resp := range cmsCh {
-			for _, kv := range resp.Kvs {
-				if strings.HasSuffix(string(kv.Key), "/kube-root-ca.crt") {
-					log.Info("Deleting old kube-root-ca.crt", "key", string(kv.Key))
-					if _, err := etcdClient.Delete(ctx, string(kv.Key)); err != nil {
-						return fmt.Errorf("failed to delete kube-root-ca.crt %s: %w", string(kv.Key), err)
-					}
+		resp, err := etcdClient.Get(ctx, "/registry/configmaps/", clientv3.WithPrefix(), clientv3.WithKeysOnly(), clientv3.WithRev(int64(0)))
+		if err != nil {
+			return fmt.Errorf("failed to get config maps: %w", err)
+		}
+
+		for _, kv := range resp.Kvs {
+			if strings.HasSuffix(string(kv.Key), "/kube-root-ca.crt") {
+				log.Info("Deleting old kube-root-ca.crt", "key", string(kv.Key))
+				if _, err := etcdClient.Delete(ctx, string(kv.Key)); err != nil {
+					return fmt.Errorf("failed to delete kube-root-ca.crt %s: %w", string(kv.Key), err)
 				}
 			}
-		}
-		for cmsErr := range cmsErrCh {
-			return fmt.Errorf("failed to sync config maps: %w", cmsErr)
 		}
 
 		log.Info("Deleting old vcluster mappings")
